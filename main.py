@@ -302,59 +302,156 @@ def calculate(df_sales: pd.DataFrame, df_inv: pd.DataFrame,
 
 def export_excel(df_fill: pd.DataFrame, df_transfer: pd.DataFrame,
                  save_path: str):
-    """Write both sheets to an Excel file with formatting."""
+    """Write both sheets to an Excel file with rich formatting."""
     with pd.ExcelWriter(save_path, engine='xlsxwriter') as writer:
         workbook = writer.book
 
+        # ── Formats ──────────────────────────────────────────────────────────
+        def _f(props):
+            base = {'border': 1, 'valign': 'vcenter'}
+            return workbook.add_format({**base, **props})
+
+        # Title bar (row 0)
+        title_fmt = workbook.add_format({
+            'bold': True, 'font_size': 13,
+            'bg_color': '#0D47A1', 'font_color': '#FFFFFF',
+            'align': 'center', 'valign': 'vcenter',
+        })
+
+        # Header row (row 1)
         header_fmt = workbook.add_format({
-            'bold': True, 'bg_color': '#1565C0', 'font_color': 'white',
+            'bold': True, 'bg_color': '#1565C0', 'font_color': '#FFFFFF',
             'border': 1, 'align': 'center', 'valign': 'vcenter',
             'text_wrap': True,
         })
-        cell_fmt = workbook.add_format({
+
+        # Data rows — odd (white) / even (light blue)
+        c_odd, c_even = '#FFFFFF', '#DCEEFB'
+        cell  = [_f({'bg_color': c_odd,  'align': 'left'}),
+                 _f({'bg_color': c_even, 'align': 'left'})]
+        num   = [_f({'bg_color': c_odd,  'align': 'center', 'num_format': '#,##0'}),
+                 _f({'bg_color': c_even, 'align': 'center', 'num_format': '#,##0'})]
+        dec   = [_f({'bg_color': c_odd,  'align': 'center', 'num_format': '#,##0.00'}),
+                 _f({'bg_color': c_even, 'align': 'center', 'num_format': '#,##0.00'})]
+
+        # Highlight cells (fill qty / transfer qty) — odd / even
+        hl_fill = [_f({'bold': True, 'bg_color': '#90CAF9', 'align': 'center', 'num_format': '#,##0'}),
+                   _f({'bold': True, 'bg_color': '#BBDEFB', 'align': 'center', 'num_format': '#,##0'})]
+        hl_xfer = [_f({'bold': True, 'bg_color': '#FFD54F', 'align': 'center', 'num_format': '#,##0'}),
+                   _f({'bold': True, 'bg_color': '#FFF8E1', 'align': 'center', 'num_format': '#,##0'})]
+
+        # Subtotal row
+        sub_text  = workbook.add_format({
+            'bold': True, 'italic': True,
+            'bg_color': '#1E88E5', 'font_color': '#FFFFFF',
             'border': 1, 'align': 'left', 'valign': 'vcenter',
         })
-        num_fmt = workbook.add_format({
+        sub_num   = workbook.add_format({
+            'bold': True, 'italic': True,
+            'bg_color': '#1E88E5', 'font_color': '#FFFFFF',
             'border': 1, 'align': 'center', 'valign': 'vcenter',
             'num_format': '#,##0',
         })
-        dec_fmt = workbook.add_format({
-            'border': 1, 'align': 'center', 'valign': 'vcenter',
-            'num_format': '#,##0.00',
-        })
-        hl_fmt = workbook.add_format({           # highlight fill qty
-            'bold': True, 'bg_color': '#E3F2FD',
-            'border': 1, 'align': 'center', 'num_format': '#,##0',
-        })
-        hl2_fmt = workbook.add_format({          # highlight transfer qty
-            'bold': True, 'bg_color': '#FFF8E1',
-            'border': 1, 'align': 'center', 'num_format': '#,##0',
+        sub_blank = workbook.add_format({
+            'bg_color': '#1E88E5', 'border': 1,
         })
 
-        def write_sheet(df, sheet_name, highlight_col=None, highlight_fmt=None):
-            df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
-            ws = writer.sheets[sheet_name]
-            ws.set_row(0, 5)   # tiny top padding row
-            for col_idx, col_name in enumerate(df.columns):
-                ws.write(1, col_idx, col_name, header_fmt)
-            for row_idx, row in enumerate(df.itertuples(index=False), start=2):
-                for col_idx, val in enumerate(row):
-                    col_name = df.columns[col_idx]
-                    if col_name == highlight_col:
-                        ws.write(row_idx, col_idx, val, highlight_fmt)
-                    elif isinstance(val, float):
-                        ws.write(row_idx, col_idx, val, dec_fmt)
-                    elif isinstance(val, (int, np.integer)):
-                        ws.write(row_idx, col_idx, val, num_fmt)
+        # ── Inner writer ──────────────────────────────────────────────────────
+        def write_sheet(df, sheet_name, title_text,
+                        group_col, sum_cols,
+                        highlight_col=None, hl_fmts=None):
+
+            n_cols   = len(df.columns)
+            col_list = list(df.columns)
+            ws       = workbook.add_worksheet(sheet_name)
+
+            # Row 0 — title (merged across all columns)
+            ws.merge_range(0, 0, 0, n_cols - 1, title_text, title_fmt)
+            ws.set_row(0, 30)
+
+            # Row 1 — header
+            for ci, name in enumerate(col_list):
+                ws.write(1, ci, name, header_fmt)
+            ws.set_row(1, 38)
+
+            # Freeze: 2 header rows + 3 left columns
+            ws.freeze_panes(2, 3)
+
+            # Data rows + subtotals
+            ri  = 2   # current Excel row index
+            alt = 0   # alternating colour counter (resets each group)
+
+            for group_val, grp in df.groupby(group_col, sort=False):
+                sums = {c: 0 for c in sum_cols}
+                alt  = 0   # reset stripe colour at the start of each group
+
+                for _, row in grp.iterrows():
+                    p = alt % 2  # 0 = odd (white), 1 = even (light blue)
+
+                    for ci, col in enumerate(col_list):
+                        val = row[col]
+                        if val is None or (isinstance(val, float) and np.isnan(val)):
+                            val = ''
+
+                        # accumulate subtotals
+                        if col in sum_cols and isinstance(val, (int, float, np.integer, np.floating)):
+                            sums[col] += val
+
+                        # pick format
+                        if col == highlight_col and hl_fmts:
+                            fmt = hl_fmts[p]
+                        elif isinstance(val, float):
+                            fmt = dec[p]
+                        elif isinstance(val, (int, np.integer)):
+                            fmt = num[p]
+                        else:
+                            fmt = cell[p]
+
+                        ws.write(ri, ci, val if val != '' else '', fmt)
+
+                    ws.set_row(ri, 18)
+                    ri  += 1
+                    alt += 1
+
+                # Subtotal row
+                for ci, col in enumerate(col_list):
+                    if ci == 0:
+                        ws.write(ri, ci, f'Tổng  {group_val}', sub_text)
+                    elif col in sum_cols:
+                        ws.write(ri, ci, sums[col], sub_num)
                     else:
-                        ws.write(row_idx, col_idx, str(val) if val is not None else '', cell_fmt)
-            # auto-width
-            for col_idx, col_name in enumerate(df.columns):
-                max_len = max(len(str(col_name)), df[col_name].astype(str).str.len().max())
-                ws.set_column(col_idx, col_idx, min(max_len + 2, 45))
+                        ws.write(ri, ci, '', sub_blank)
+                ws.set_row(ri, 20)
+                ri += 1
 
-        write_sheet(df_fill, 'Fill từ kho', 'Fill thực tế', hl_fmt)
-        write_sheet(df_transfer, 'Luân chuyển cửa hàng', 'Đề xuất luân chuyển', hl2_fmt)
+            # Auto column widths
+            for ci, col in enumerate(col_list):
+                if df.empty:
+                    max_len = len(str(col))
+                else:
+                    max_len = max(len(str(col)), df[col].astype(str).str.len().max())
+                ws.set_column(ci, ci, min(max_len + 2, 48))
+
+        # ── Sheet 1: Fill từ kho ─────────────────────────────────────────────
+        write_sheet(
+            df_fill, 'Fill từ kho',
+            title_text  = 'PHÂN TÍCH FILL HÀNG TỪ KHO',
+            group_col   = 'Cửa hàng',
+            sum_cols    = ['Đã bán 3T', 'Tồn cửa hàng', 'Mức tồn mục tiêu',
+                           'Đề xuất fill', 'Fill thực tế'],
+            highlight_col = 'Fill thực tế',
+            hl_fmts     = hl_fill,
+        )
+
+        # ── Sheet 2: Luân chuyển cửa hàng ───────────────────────────────────
+        write_sheet(
+            df_transfer, 'Luân chuyển cửa hàng',
+            title_text  = 'PHÂN TÍCH LUÂN CHUYỂN HÀNG HOÁ GIỮA CÁC CỬA HÀNG',
+            group_col   = 'Cửa hàng gửi',
+            sum_cols    = ['Tồn gửi', 'Đề xuất luân chuyển'],
+            highlight_col = 'Đề xuất luân chuyển',
+            hl_fmts     = hl_xfer,
+        )
 
 
 # ─── GUI ─────────────────────────────────────────────────────────────────────
