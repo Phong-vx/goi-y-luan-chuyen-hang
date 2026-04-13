@@ -127,6 +127,31 @@ TransferQty = min(need_còn_lại, tồn_slow_còn_lại)
 
 ---
 
+## 5b. Category & Trạng thái (bổ sung)
+
+**SKU → Category mapping:** Tìm cột đầu tiên trong `['Category', 'Danh mục', 'Product Category', 'Nhóm hàng', 'Nhóm SP', 'Nhóm', 'Loại hàng']` trong file bán hàng. Nếu không tìm thấy → mặc định "Chưa phân loại".
+
+**Trạng thái Sheet 1 (Fill từ kho):**
+- `Fill thực tế >= 1` → **Cần Fill hàng** (màu cam đỏ)
+- còn lại → **Đủ hàng** (màu xanh lá)
+
+**Trạng thái Sheet 2 (Luân chuyển):**
+- `Đề xuất luân chuyển >= 1` → **Cần Luân Chuyển**
+- còn lại → **Đủ hàng**
+
+**Sheet 3 — Tổng hợp (aggregate):**
+```
+Cửa hàng | Category | Fill từ kho | Chuyển đi | Nhận đến
+```
+- `Fill từ kho` = sum(Fill thực tế) theo cửa hàng × Category
+- `Chuyển đi` = sum(Đề xuất luân chuyển) nhóm theo Cửa hàng gửi × Category
+- `Nhận đến` = sum(Đề xuất luân chuyển) nhóm theo Cửa hàng nhận × Category
+- Có subtotal row theo từng Cửa hàng
+
+`calculate()` trả về **4-tuple**: `(df_fill, df_transfer, df_summary, warnings)`.
+
+---
+
 ## 6. Output Excel (`export_excel()`)
 
 Dùng `xlsxwriter` engine. Mỗi sheet có:
@@ -146,12 +171,17 @@ Dùng `xlsxwriter` engine. Mỗi sheet có:
 App (tk.Tk)
 ├── header          Logo + tiêu đề
 ├── body
-│   ├── import_card     Chọn 2 file Excel (bán hàng + tồn kho)
-│   ├── store_card      Listbox cửa hàng vật lý | kênh Shopee (multi-select)
+│   ├── import_card     Chọn 2 file Excel + nút "Đọc File" + trạng thái đọc
+│   ├── store_card      CheckListbox "Kho Cửa Hàng" | "Các kho khác" (mỗi cột có ô tìm kiếm)
 │   ├── settings_card   Spinbox: target_months, slow_pct, min_fill_avg + checkbox HCM↔HN
-│   ├── action_bar      Btn "Phân Tích" | Btn "Xuất Excel" | ProgressBar | status label
-│   └── results         Notebook 2 tab → Treeview (Fill từ kho | Luân chuyển cửa hàng)
+│   └── action_bar      Btn "Xuất Excel" | ProgressBar | status label
 ```
+
+**Flow người dùng:**
+1. Chọn file bán hàng + file tồn kho → nút "Đọc File" được bật
+2. Bấm "Đọc File" → đọc file trong thread, populate 2 CheckListbox + bật "Xuất Excel"
+3. Chọn kho cần phân tích (tick/untick, dùng ô tìm kiếm)
+4. Bấm "Xuất Excel" → chọn đường dẫn lưu → phân tích + xuất trong 1 bước
 
 **Threading:** Đọc file + tính toán chạy trên daemon thread riêng. Cập nhật UI thông qua `self.after(0, callback)` để tránh block main thread.
 
@@ -202,3 +232,5 @@ App (tk.Tk)
 |---|---|---|
 | 2026-04-13 | Tạo file PROJECT_CONTEXT.md | Tạo mới để lưu context dự án |
 | 2026-04-13 | Thay Listbox bằng CheckListbox (checkbox tick), đổi "Cửa hàng vật lý" → "Kho Cửa Hàng", "Kênh Shopee" → "Các kho khác"; phân loại store: chỉ store có doanh số 3T gần nhất vào Kho Cửa Hàng, còn lại (shopee/droppi/xe thuê/kho kg/không có số bán) vào Các kho khác; thêm DPI awareness cho Windows (`SetProcessDpiAwareness(2)`) | Cải thiện UX bộ lọc cửa hàng và độ nét trên màn hình HiDPI |
+| 2026-04-13 | Bỏ nút "Phân Tích" và phần preview Treeview; thêm nút "Đọc File" trong import card; thêm ô tìm kiếm realtime cho mỗi CheckListbox; gộp phân tích + xuất Excel vào 1 bước; CheckListbox nâng cấp dùng `_var_map` để filter không mất selection state | Đơn giản hoá flow: Đọc File → chọn kho → Xuất Excel |
+| 2026-04-13 | Thêm cột Trạng thái (Cần Fill hàng/Cần Luân Chuyển/Đủ hàng) vào Sheet1+Sheet2; thêm cột Category (từ cột Category trong file bán hàng, fallback "Chưa phân loại"); thêm Sheet3 "Tổng hợp" aggregate Fill từ kho + Chuyển đi + Nhận đến theo Cửa hàng × Category; `calculate()` trả 4-tuple (df_fill, df_transfer, df_summary, warnings) | Cần nhìn tổng quan theo Category (Bike/Gear) cho từng cửa hàng |

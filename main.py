@@ -103,6 +103,18 @@ def calculate(df_sales: pd.DataFrame, df_inv: pd.DataFrame,
         .rename(columns={'Product Item': 'ProductName'})
     )
 
+    # ── SKU → Category mapping ────────────────────────────────────────────────
+    _CAT_COLS = ['Category', 'Danh mục', 'Danh Mục', 'Product Category',
+                 'Nhóm hàng', 'Nhóm SP', 'Nhóm', 'Loại hàng']
+    _cat_col  = next((c for c in _CAT_COLS if c in df_sales.columns), None)
+    if _cat_col:
+        sku_cat = (df_sales[['SKU', _cat_col]]
+                   .drop_duplicates('SKU')
+                   .rename(columns={_cat_col: 'Category'}))
+        sku_cat['SKU'] = sku_cat['SKU'].astype(str)
+    else:
+        sku_cat = pd.DataFrame(columns=['SKU', 'Category'])
+
     # ── retail inventory ─────────────────────────────────────────────────────
     inv_retail = df_inv[df_inv['Địa điểm/Team'].str.strip() == 'Bán Lẻ'].copy()
     inv_retail = inv_retail.rename(columns={
@@ -189,6 +201,22 @@ def calculate(df_sales: pd.DataFrame, df_inv: pd.DataFrame,
     df_fill['Sức bán TB/tháng'] = df_fill['Sức bán TB/tháng'].round(2)
     df_fill = df_fill.sort_values(['Cửa hàng', 'Sức bán TB/tháng'], ascending=[True, False])
 
+    # Category + Trạng thái cho Sheet 1
+    if not sku_cat.empty:
+        df_fill = (df_fill
+                   .merge(sku_cat, left_on='Mã hàng', right_on='SKU', how='left')
+                   .drop(columns=['SKU']))
+    else:
+        df_fill['Category'] = 'Chưa phân loại'
+    df_fill['Category']   = df_fill['Category'].fillna('Chưa phân loại')
+    df_fill['Trạng thái'] = df_fill['Fill thực tế'].apply(
+        lambda x: 'Cần Fill hàng' if x >= 1 else 'Đủ hàng'
+    )
+    df_fill = df_fill[['Cửa hàng', 'Mã hàng', 'Tên sản phẩm', 'Category',
+                        'Đã bán 3T', 'Sức bán TB/tháng', 'Tuần tồn kho',
+                        'Tồn cửa hàng', 'Mức tồn mục tiêu', 'Đề xuất fill',
+                        'Tồn kho', 'Fill thực tế', 'Trạng thái']]
+
     # ── SHEET 2: transfers between stores ────────────────────────────────────
     relevant_skus = set(vel['SKU'].astype(str).unique()) | set(
         store_inv[store_inv['StoreQty'] > 0]['SKU'].astype(str).unique()
@@ -208,14 +236,26 @@ def calculate(df_sales: pd.DataFrame, df_inv: pd.DataFrame,
             })
 
     _empty_transfer = pd.DataFrame(columns=[
-        'Mã hàng', 'Tên sản phẩm',
+        'Mã hàng', 'Tên sản phẩm', 'Category',
         'Cửa hàng gửi', 'Tồn gửi', 'Sức bán gửi TB/tháng',
         'Cửa hàng nhận', 'Tồn nhận', 'Sức bán nhận TB/tháng',
-        'Đề xuất luân chuyển',
+        'Đề xuất luân chuyển', 'Trạng thái',
     ])
 
     if not grid_rows:
-        return df_fill, _empty_transfer, warnings
+        # build minimal summary from fill only
+        if not df_fill.empty:
+            _summ = (df_fill
+                     .groupby(['Cửa hàng', 'Category'], as_index=False)['Fill thực tế']
+                     .sum()
+                     .rename(columns={'Fill thực tế': 'Fill từ kho'}))
+            _summ['Chuyển đi'] = 0
+            _summ['Nhận đến']  = 0
+            _summ = _summ.sort_values(['Cửa hàng', 'Category'])
+        else:
+            _summ = pd.DataFrame(columns=['Cửa hàng', 'Category',
+                                          'Fill từ kho', 'Chuyển đi', 'Nhận đến'])
+        return df_fill, _empty_transfer, _summ, warnings
 
     grid = pd.DataFrame(grid_rows)
     sku_avg_vel = grid.groupby('SKU')['AvgMonthly'].mean().to_dict()
@@ -294,13 +334,69 @@ def calculate(df_sales: pd.DataFrame, df_inv: pd.DataFrame,
             'TransferQty':    'Đề xuất luân chuyển',
         })
         df_transfer = df_transfer.sort_values(['Mã hàng', 'Cửa hàng gửi'])
+
+        # Category + Trạng thái cho Sheet 2
+        if not sku_cat.empty:
+            df_transfer = (df_transfer
+                           .merge(sku_cat, left_on='Mã hàng', right_on='SKU', how='left')
+                           .drop(columns=['SKU']))
+        else:
+            df_transfer['Category'] = 'Chưa phân loại'
+        df_transfer['Category']   = df_transfer['Category'].fillna('Chưa phân loại')
+        df_transfer['Trạng thái'] = df_transfer['Đề xuất luân chuyển'].apply(
+            lambda x: 'Cần Luân Chuyển' if x >= 1 else 'Đủ hàng'
+        )
+        df_transfer = df_transfer[['Mã hàng', 'Tên sản phẩm', 'Category',
+                                    'Cửa hàng gửi', 'Tồn gửi', 'Sức bán gửi TB/tháng',
+                                    'Cửa hàng nhận', 'Tồn nhận', 'Sức bán nhận TB/tháng',
+                                    'Đề xuất luân chuyển', 'Trạng thái']]
     else:
         df_transfer = _empty_transfer
 
-    return df_fill, df_transfer, warnings
+    # ── SHEET 3: summary by store × category ─────────────────────────────────
+    fill_agg = (df_fill
+                .groupby(['Cửa hàng', 'Category'], as_index=False)['Fill thực tế']
+                .sum()
+                .rename(columns={'Fill thực tế': 'Fill từ kho'}))
+
+    if not df_transfer.empty:
+        sent_agg = (df_transfer
+                    .groupby(['Cửa hàng gửi', 'Category'], as_index=False)['Đề xuất luân chuyển']
+                    .sum()
+                    .rename(columns={'Cửa hàng gửi': 'Cửa hàng',
+                                     'Đề xuất luân chuyển': 'Chuyển đi'}))
+        recv_agg = (df_transfer
+                    .groupby(['Cửa hàng nhận', 'Category'], as_index=False)['Đề xuất luân chuyển']
+                    .sum()
+                    .rename(columns={'Cửa hàng nhận': 'Cửa hàng',
+                                     'Đề xuất luân chuyển': 'Nhận đến'}))
+    else:
+        sent_agg = pd.DataFrame(columns=['Cửa hàng', 'Category', 'Chuyển đi'])
+        recv_agg = pd.DataFrame(columns=['Cửa hàng', 'Category', 'Nhận đến'])
+
+    _pairs = set()
+    for _d in (fill_agg, sent_agg, recv_agg):
+        if not _d.empty:
+            _pairs.update(zip(_d['Cửa hàng'], _d['Category']))
+
+    if _pairs:
+        _base = pd.DataFrame(list(_pairs), columns=['Cửa hàng', 'Category'])
+        df_summary = (_base
+                      .merge(fill_agg, on=['Cửa hàng', 'Category'], how='left')
+                      .merge(sent_agg, on=['Cửa hàng', 'Category'], how='left')
+                      .merge(recv_agg, on=['Cửa hàng', 'Category'], how='left'))
+        for _c in ['Fill từ kho', 'Chuyển đi', 'Nhận đến']:
+            df_summary[_c] = df_summary[_c].fillna(0).astype(int)
+        df_summary = df_summary.sort_values(['Cửa hàng', 'Category'])
+    else:
+        df_summary = pd.DataFrame(columns=['Cửa hàng', 'Category',
+                                           'Fill từ kho', 'Chuyển đi', 'Nhận đến'])
+
+    return df_fill, df_transfer, df_summary, warnings
 
 
-def export_excel(df_fill: pd.DataFrame, df_transfer: pd.DataFrame, save_path: str):
+def export_excel(df_fill: pd.DataFrame, df_transfer: pd.DataFrame,
+                 df_summary: pd.DataFrame, save_path: str):
     with pd.ExcelWriter(save_path, engine='xlsxwriter') as writer:
         workbook = writer.book
 
@@ -328,6 +424,19 @@ def export_excel(df_fill: pd.DataFrame, df_transfer: pd.DataFrame, save_path: st
                    _f({'bold': True, 'bg_color': '#BBDEFB', 'align': 'center', 'num_format': '#,##0'})]
         hl_xfer = [_f({'bold': True, 'bg_color': '#FFD54F', 'align': 'center', 'num_format': '#,##0'}),
                    _f({'bold': True, 'bg_color': '#FFF8E1', 'align': 'center', 'num_format': '#,##0'})]
+        # Trạng thái: Cần Fill/Cần Luân Chuyển = cam đỏ, Đủ hàng = xanh lá
+        status_need = [
+            workbook.add_format({'bold': True, 'bg_color': '#FFCCBC', 'font_color': '#BF360C',
+                                  'border': 1, 'align': 'center', 'valign': 'vcenter'}),
+            workbook.add_format({'bold': True, 'bg_color': '#FFE0B2', 'font_color': '#BF360C',
+                                  'border': 1, 'align': 'center', 'valign': 'vcenter'}),
+        ]
+        status_ok = [
+            workbook.add_format({'bold': True, 'bg_color': '#C8E6C9', 'font_color': '#1B5E20',
+                                  'border': 1, 'align': 'center', 'valign': 'vcenter'}),
+            workbook.add_format({'bold': True, 'bg_color': '#DCEDC8', 'font_color': '#1B5E20',
+                                  'border': 1, 'align': 'center', 'valign': 'vcenter'}),
+        ]
         sub_text  = workbook.add_format({
             'bold': True, 'italic': True,
             'bg_color': '#1E88E5', 'font_color': '#FFFFFF',
@@ -364,7 +473,10 @@ def export_excel(df_fill: pd.DataFrame, df_transfer: pd.DataFrame, save_path: st
                             val = ''
                         if col in sum_cols and isinstance(val, (int, float, np.integer, np.floating)):
                             sums[col] += val
-                        if col == highlight_col and hl_fmts:
+                        if col == 'Trạng thái':
+                            is_need = str(val).startswith('Cần')
+                            fmt = status_need[p] if is_need else status_ok[p]
+                        elif col == highlight_col and hl_fmts:
                             fmt = hl_fmts[p]
                         elif isinstance(val, float):
                             fmt = dec[p]
@@ -410,12 +522,19 @@ def export_excel(df_fill: pd.DataFrame, df_transfer: pd.DataFrame, save_path: st
             highlight_col = 'Đề xuất luân chuyển',
             hl_fmts       = hl_xfer,
         )
+        write_sheet(
+            df_summary, 'Tổng hợp',
+            title_text    = 'TỔNG HỢP PHÂN TÍCH LUÂN CHUYỂN HÀNG HOÁ',
+            group_col     = 'Cửa hàng',
+            sum_cols      = ['Fill từ kho', 'Chuyển đi', 'Nhận đến'],
+            highlight_col = None,
+        )
 
 
 # ─── CheckListbox ─────────────────────────────────────────────────────────────
 
 class CheckListbox(tk.Frame):
-    """Scrollable list of Checkbutton widgets with select/deselect-all support."""
+    """Scrollable list of Checkbutton widgets with select/deselect-all and live filter."""
 
     def __init__(self, parent, height=130, **kwargs):
         super().__init__(parent, bg='#FAFAFA',
@@ -440,16 +559,26 @@ class CheckListbox(tk.Frame):
         self._canvas.bind('<MouseWheel>',
             lambda e: self._canvas.yview_scroll(int(-1 * (e.delta / 120)), 'units'))
 
-        self._vars:  list = []
-        self._items: list = []
+        self._var_map:   dict = {}   # {item_name: BooleanVar} — full state
+        self._all_items: list = []
 
     def set_items(self, items: list, select_all: bool = True):
+        self._all_items = list(items)
+        self._var_map   = {item: tk.BooleanVar(value=select_all) for item in items}
+        self._render(self._all_items)
+
+    def filter(self, text: str):
+        q = text.strip().lower()
+        visible = self._all_items if not q else [
+            i for i in self._all_items if q in i.lower()
+        ]
+        self._render(visible)
+
+    def _render(self, items: list):
         for w in self._inner.winfo_children():
             w.destroy()
-        self._vars  = []
-        self._items = list(items)
         for item in items:
-            var = tk.BooleanVar(value=select_all)
+            var = self._var_map[item]
             tk.Checkbutton(
                 self._inner, text=item, variable=var,
                 bg='#FAFAFA', fg=TEXT_DARK,
@@ -458,18 +587,18 @@ class CheckListbox(tk.Frame):
                 selectcolor='white', anchor='w',
                 relief='flat', bd=0,
             ).pack(fill='x', padx=6, pady=1)
-            self._vars.append(var)
+        self._canvas.yview_moveto(0)
 
     def select_all(self):
-        for var in self._vars:
+        for var in self._var_map.values():
             var.set(True)
 
     def deselect_all(self):
-        for var in self._vars:
+        for var in self._var_map.values():
             var.set(False)
 
     def get_selected(self) -> list:
-        return [item for item, var in zip(self._items, self._vars) if var.get()]
+        return [item for item, var in self._var_map.items() if var.get()]
 
 
 # ─── GUI ──────────────────────────────────────────────────────────────────────
@@ -489,19 +618,17 @@ class App(tk.Tk):
         self.slow_pct      = tk.DoubleVar(value=50.0)
         self.min_fill_avg  = tk.DoubleVar(value=0.4)
         self.allow_hcm_hn  = tk.BooleanVar(value=False)
-        self.status_text   = tk.StringVar(value="Chưa phân tích")
+        self.status_text   = tk.StringVar(value="Chọn file và bấm Đọc File")
 
         self._physical_stores: list = []
         self._shopee_stores:   list = []
         self.df_sales_raw = None
         self.df_inv_raw   = None
-        self.df_fill      = None
-        self.df_transfer  = None
 
         self._build_ui()
         self._center()
 
-        # Auto-load store list when both files selected
+        # Enable "Đọc File" button when both files are selected
         self.sales_path.trace_add('write', self._on_file_changed)
         self.inv_path.trace_add('write',   self._on_file_changed)
 
@@ -509,7 +636,7 @@ class App(tk.Tk):
 
     def _center(self):
         self.update_idletasks()
-        w, h = 1020, 840
+        w, h = 1020, 720
         x = (self.winfo_screenwidth()  - w) // 2
         y = (self.winfo_screenheight() - h) // 2
         self.geometry(f"{w}x{h}+{x}+{y}")
@@ -558,16 +685,15 @@ class App(tk.Tk):
         self._build_store_card(body)
         self._build_settings_card(body)
         self._build_action_bar(body)
-        self._build_results(body)
 
-    # ── import card (compact, both files on one row) ─────────────────────────
+    # ── import card ──────────────────────────────────────────────────────────
 
     def _build_import_card(self, parent):
         card = self._card(parent, "Nhập dữ liệu")
         card.pack(fill='x', pady=(0, 8))
 
         row = tk.Frame(card, bg=CARD_BG)
-        row.grid(row=1, column=0, columnspan=3, sticky='ew', padx=14, pady=8)
+        row.grid(row=1, column=0, columnspan=3, sticky='ew', padx=14, pady=(8, 4))
         for i in (1, 4):
             row.grid_columnconfigure(i, weight=1)
 
@@ -585,7 +711,6 @@ class App(tk.Tk):
                   padx=10, pady=3
                   ).grid(row=0, column=2, padx=(0, 20))
 
-        # separator line
         tk.Frame(row, bg=BORDER, width=1, height=28
                  ).grid(row=0, column=3, sticky='ns', padx=4)
 
@@ -602,6 +727,26 @@ class App(tk.Tk):
                   font=('Segoe UI', 9), relief='flat', cursor='hand2',
                   padx=10, pady=3
                   ).grid(row=0, column=6)
+
+        # ── Đọc File button row ──────────────────────────────────────────────
+        btn_row = tk.Frame(card, bg=CARD_BG)
+        btn_row.grid(row=2, column=0, columnspan=3, sticky='ew', padx=14, pady=(4, 10))
+
+        self.btn_read = tk.Button(
+            btn_row, text="  Đọc File  ",
+            command=self._on_read_file_click,
+            bg=ACCENT, fg='white', activebackground=PRIMARY,
+            font=('Segoe UI', 10, 'bold'),
+            relief='flat', cursor='hand2', padx=16, pady=6,
+            state='disabled',
+        )
+        self.btn_read.pack(side='left')
+
+        self.read_status = tk.Label(
+            btn_row, text="",
+            bg=CARD_BG, fg=TEXT_LIGHT, font=('Segoe UI', 9),
+        )
+        self.read_status.pack(side='left', padx=12)
 
     # ── store selection card ─────────────────────────────────────────────────
 
@@ -626,7 +771,7 @@ class App(tk.Tk):
         self.lbl_physical_count.pack(side='left', padx=6)
 
         ph_btns = tk.Frame(ph, bg=CARD_BG)
-        ph_btns.pack(fill='x', pady=(3, 3))
+        ph_btns.pack(fill='x', pady=(3, 2))
         tk.Button(ph_btns, text="Chọn tất cả", font=('Segoe UI', 8),
                   bg='#E3F2FD', fg=PRIMARY, relief='flat', cursor='hand2', padx=6, pady=1,
                   command=lambda: self.lb_physical.select_all()
@@ -635,6 +780,22 @@ class App(tk.Tk):
                   bg='#FFF3E0', fg=WARNING, relief='flat', cursor='hand2', padx=6, pady=1,
                   command=lambda: self.lb_physical.deselect_all()
                   ).pack(side='left')
+
+        self._ph_search = tk.StringVar()
+        ph_search_entry = tk.Entry(
+            ph, textvariable=self._ph_search,
+            font=('Segoe UI', 9), fg=TEXT_MID,
+            relief='flat', bd=0,
+            highlightbackground=BORDER, highlightthickness=1,
+        )
+        ph_search_entry.pack(fill='x', pady=(2, 4))
+        ph_search_entry.insert(0, "Tìm kiếm kho...")
+        ph_search_entry.config(fg=TEXT_LIGHT)
+        ph_search_entry.bind('<FocusIn>',  lambda e: self._search_focus_in(ph_search_entry,  self._ph_search))
+        ph_search_entry.bind('<FocusOut>', lambda e: self._search_focus_out(ph_search_entry, self._ph_search, "Tìm kiếm kho..."))
+        self._ph_search.trace_add('write', lambda *_: self.lb_physical.filter(
+            '' if self._ph_search.get() == "Tìm kiếm kho..." else self._ph_search.get()
+        ))
 
         self.lb_physical = CheckListbox(ph, height=130)
         self.lb_physical.pack(fill='both', expand=True)
@@ -654,7 +815,7 @@ class App(tk.Tk):
         self.lbl_shopee_count.pack(side='left', padx=6)
 
         sp_btns = tk.Frame(sp, bg=CARD_BG)
-        sp_btns.pack(fill='x', pady=(3, 3))
+        sp_btns.pack(fill='x', pady=(3, 2))
         tk.Button(sp_btns, text="Chọn tất cả", font=('Segoe UI', 8),
                   bg='#E3F2FD', fg=PRIMARY, relief='flat', cursor='hand2', padx=6, pady=1,
                   command=lambda: self.lb_shopee.select_all()
@@ -663,6 +824,22 @@ class App(tk.Tk):
                   bg='#FFF3E0', fg=WARNING, relief='flat', cursor='hand2', padx=6, pady=1,
                   command=lambda: self.lb_shopee.deselect_all()
                   ).pack(side='left')
+
+        self._sp_search = tk.StringVar()
+        sp_search_entry = tk.Entry(
+            sp, textvariable=self._sp_search,
+            font=('Segoe UI', 9), fg=TEXT_MID,
+            relief='flat', bd=0,
+            highlightbackground=BORDER, highlightthickness=1,
+        )
+        sp_search_entry.pack(fill='x', pady=(2, 4))
+        sp_search_entry.insert(0, "Tìm kiếm kho...")
+        sp_search_entry.config(fg=TEXT_LIGHT)
+        sp_search_entry.bind('<FocusIn>',  lambda e: self._search_focus_in(sp_search_entry,  self._sp_search))
+        sp_search_entry.bind('<FocusOut>', lambda e: self._search_focus_out(sp_search_entry, self._sp_search, "Tìm kiếm kho..."))
+        self._sp_search.trace_add('write', lambda *_: self.lb_shopee.filter(
+            '' if self._sp_search.get() == "Tìm kiếm kho..." else self._sp_search.get()
+        ))
 
         self.lb_shopee = CheckListbox(sp, height=130)
         self.lb_shopee.pack(fill='both', expand=True)
@@ -735,15 +912,6 @@ class App(tk.Tk):
         btn_bar = tk.Frame(parent, bg=BG)
         btn_bar.pack(fill='x', pady=(0, 8))
 
-        self.btn_analyze = tk.Button(
-            btn_bar, text="  Phân Tích  ",
-            command=self._run_analysis,
-            bg=PRIMARY, fg='white', activebackground=PRIMARY_L,
-            font=('Segoe UI', 11, 'bold'),
-            relief='flat', cursor='hand2', padx=18, pady=8,
-        )
-        self.btn_analyze.pack(side='left', padx=(0, 10))
-
         self.btn_export = tk.Button(
             btn_bar, text="  Xuất Excel  ",
             command=self._export,
@@ -760,67 +928,6 @@ class App(tk.Tk):
         tk.Label(btn_bar, textvariable=self.status_text,
                  bg=BG, fg=TEXT_MID, font=('Segoe UI', 9)).pack(side='left')
 
-    # ── results ──────────────────────────────────────────────────────────────
-
-    def _build_results(self, parent):
-        result_card = tk.Frame(parent, bg=CARD_BG,
-                               highlightbackground=BORDER, highlightthickness=1)
-        result_card.pack(fill='both', expand=True)
-
-        style = ttk.Style()
-        style.configure('TNotebook', background=CARD_BG, borderwidth=0)
-        style.configure('TNotebook.Tab',
-                        font=('Segoe UI', 10, 'bold'), padding=[14, 6])
-
-        self.notebook = ttk.Notebook(result_card)
-        self.notebook.pack(fill='both', expand=True, padx=2, pady=2)
-
-        self.tab_fill     = self._make_tab("Fill từ kho")
-        self.tab_transfer = self._make_tab("Luân chuyển cửa hàng")
-
-        self.lbl_fill_sum  = tk.StringVar(value="")
-        self.lbl_trans_sum = tk.StringVar(value="")
-        tk.Label(self.tab_fill, textvariable=self.lbl_fill_sum,
-                 bg=CARD_BG, fg=TEXT_MID,
-                 font=('Segoe UI', 9)).pack(anchor='e', padx=8)
-        tk.Label(self.tab_transfer, textvariable=self.lbl_trans_sum,
-                 bg=CARD_BG, fg=TEXT_MID,
-                 font=('Segoe UI', 9)).pack(anchor='e', padx=8)
-
-        self.tree_fill     = self._make_tree(self.tab_fill)
-        self.tree_transfer = self._make_tree(self.tab_transfer)
-
-    def _make_tab(self, label):
-        frame = tk.Frame(self.notebook, bg=CARD_BG)
-        self.notebook.add(frame, text=f"  {label}  ")
-        return frame
-
-    def _make_tree(self, parent):
-        frame = tk.Frame(parent, bg=CARD_BG)
-        frame.pack(fill='both', expand=True, padx=4, pady=(0, 4))
-
-        vsb = ttk.Scrollbar(frame, orient='vertical')
-        hsb = ttk.Scrollbar(frame, orient='horizontal')
-        vsb.pack(side='right', fill='y')
-        hsb.pack(side='bottom', fill='x')
-
-        tree = ttk.Treeview(frame,
-                            yscrollcommand=vsb.set,
-                            xscrollcommand=hsb.set,
-                            show='headings')
-        tree.pack(fill='both', expand=True)
-        vsb.config(command=tree.yview)
-        hsb.config(command=tree.xview)
-
-        style = ttk.Style()
-        style.configure('Treeview', rowheight=22, font=('Segoe UI', 9))
-        style.configure('Treeview.Heading',
-                        font=('Segoe UI', 9, 'bold'),
-                        background='#1565C0', foreground='white')
-        tree.tag_configure('odd',  background='#F5F7FA')
-        tree.tag_configure('even', background='#FFFFFF')
-        return tree
-
     # ── file browse ──────────────────────────────────────────────────────────
 
     def _browse(self, var):
@@ -830,15 +937,36 @@ class App(tk.Tk):
         if path:
             var.set(path)
 
-    # ── auto-load stores when files change ───────────────────────────────────
+    # ── search placeholder helpers ────────────────────────────────────────────
+
+    def _search_focus_in(self, entry, var):
+        if entry.cget('fg') == TEXT_LIGHT:
+            entry.delete(0, 'end')
+            entry.config(fg=TEXT_DARK)
+
+    def _search_focus_out(self, entry, var, placeholder):
+        if not var.get():
+            entry.insert(0, placeholder)
+            entry.config(fg=TEXT_LIGHT)
+
+    # ── file changed → enable Đọc File button ────────────────────────────────
 
     def _on_file_changed(self, *args):
         s = self.sales_path.get()
         i = self.inv_path.get()
         if s and i and os.path.exists(s) and os.path.exists(i):
-            self.lbl_physical_count.config(text="(đang tải...)")
-            self.lbl_shopee_count.config(text="(đang tải...)")
-            threading.Thread(target=self._load_stores_thread, daemon=True).start()
+            self.btn_read.config(state='normal')
+            self.read_status.config(text="Sẵn sàng đọc file")
+        else:
+            self.btn_read.config(state='disabled')
+
+    def _on_read_file_click(self):
+        self.btn_read.config(state='disabled')
+        self.btn_export.config(state='disabled')
+        self.read_status.config(text="Đang đọc file...")
+        self.lbl_physical_count.config(text="(đang tải...)")
+        self.lbl_shopee_count.config(text="(đang tải...)")
+        threading.Thread(target=self._load_stores_thread, daemon=True).start()
 
     def _load_stores_thread(self):
         try:
@@ -889,10 +1017,16 @@ class App(tk.Tk):
         self.lbl_shopee_count.config(
             text=f"({len(shopee)} kho)" if shopee else "(không có)"
         )
+        self.btn_read.config(state='normal')
+        self.btn_export.config(state='normal')
+        self.read_status.config(text=f"Đã tải  •  {len(physical)} kho cửa hàng  •  {len(shopee)} kho khác")
+        self.status_text.set("Chọn kho và bấm Xuất Excel")
 
     def _on_store_load_error(self):
         self.lbl_physical_count.config(text="(lỗi đọc file)")
         self.lbl_shopee_count.config(text="(lỗi đọc file)")
+        self.btn_read.config(state='normal')
+        self.read_status.config(text="Lỗi đọc file — kiểm tra lại định dạng")
 
     # ── helpers ──────────────────────────────────────────────────────────────
 
@@ -902,111 +1036,15 @@ class App(tk.Tk):
             return None  # files not loaded yet; calculate() will use all
         return self.lb_physical.get_selected() + self.lb_shopee.get_selected()
 
-    # ── analysis ─────────────────────────────────────────────────────────────
-
-    def _run_analysis(self):
-        if not self.sales_path.get():
-            messagebox.showwarning("Thiếu file", "Vui lòng chọn file dữ liệu bán hàng.")
-            return
-        if not self.inv_path.get():
-            messagebox.showwarning("Thiếu file", "Vui lòng chọn file tồn kho.")
-            return
-
-        selected = self._get_selected_stores()
-        if selected is not None and len(selected) == 0:
-            messagebox.showwarning("Chưa chọn cửa hàng",
-                                   "Vui lòng chọn ít nhất một cửa hàng để phân tích.")
-            return
-
-        self.btn_analyze.config(state='disabled')
-        self.btn_export.config(state='disabled')
-        self.status_text.set("Đang phân tích...")
-        self.progress.start(12)
-
-        threading.Thread(target=self._analysis_worker, daemon=True).start()
-
-    def _analysis_worker(self):
-        try:
-            df_sales = (self.df_sales_raw if self.df_sales_raw is not None
-                        else pd.read_excel(self.sales_path.get()))
-            df_inv   = (self.df_inv_raw   if self.df_inv_raw   is not None
-                        else pd.read_excel(self.inv_path.get()))
-
-            df_fill, df_transfer, warnings = calculate(
-                df_sales, df_inv,
-                target_months  = self.target_months.get(),
-                slow_pct       = self.slow_pct.get(),
-                selected_stores= self._get_selected_stores(),
-                allow_hcm_hn   = self.allow_hcm_hn.get(),
-                min_fill_avg   = self.min_fill_avg.get(),
-            )
-
-            self.df_fill     = df_fill
-            self.df_transfer = df_transfer
-            self.after(0, self._on_analysis_done, warnings)
-        except Exception as e:
-            self.after(0, self._on_analysis_error, str(e))
-
-    def _on_analysis_done(self, warnings):
-        self.progress.stop()
-        self.btn_analyze.config(state='normal')
-
-        if warnings:
-            messagebox.showwarning("Cảnh báo", "\n".join(warnings))
-
-        self._populate_tree(self.tree_fill,     self.df_fill)
-        self._populate_tree(self.tree_transfer, self.df_transfer)
-
-        fill_rows  = len(self.df_fill)
-        trans_rows = len(self.df_transfer)
-        total_fill  = int(self.df_fill['Fill thực tế'].sum())      if fill_rows  else 0
-        total_trans = int(self.df_transfer['Đề xuất luân chuyển'].sum()) if trans_rows else 0
-
-        self.lbl_fill_sum.set(f"{fill_rows} dòng  |  Tổng fill: {total_fill:,} SP")
-        self.lbl_trans_sum.set(f"{trans_rows} dòng  |  Tổng luân chuyển: {total_trans:,} SP")
-        self.status_text.set(
-            f"Hoàn thành  •  Fill: {total_fill:,} SP  •  Luân chuyển: {total_trans:,} SP"
-        )
-        self.btn_export.config(state='normal')
-
-    def _on_analysis_error(self, msg):
-        self.progress.stop()
-        self.btn_analyze.config(state='normal')
-        self.status_text.set("Lỗi!")
-        messagebox.showerror("Lỗi phân tích", msg)
-
-    def _populate_tree(self, tree, df):
-        tree.delete(*tree.get_children())
-        if df is None or df.empty:
-            tree['columns'] = ('empty',)
-            tree.heading('empty', text='Không có dữ liệu')
-            tree.column('empty', width=300)
-            return
-
-        cols = list(df.columns)
-        tree['columns'] = cols
-        for col in cols:
-            tree.heading(col, text=col, anchor='center')
-            w = max(len(col) * 9, 80)
-            tree.column(col, width=w, anchor='center', minwidth=60)
-
-        for i, row in enumerate(df.itertuples(index=False)):
-            tag = 'odd' if i % 2 else 'even'
-            values = []
-            for v in row:
-                if isinstance(v, float):
-                    values.append(f"{v:,.2f}")
-                elif isinstance(v, (int, np.integer)):
-                    values.append(f"{v:,}")
-                else:
-                    values.append(str(v) if v is not None else '')
-            tree.insert('', 'end', values=values, tags=(tag,))
-
-    # ── export ───────────────────────────────────────────────────────────────
+    # ── export (phân tích + xuất trong 1 bước) ───────────────────────────────
 
     def _export(self):
-        if self.df_fill is None:
+        selected = self._get_selected_stores()
+        if selected is not None and len(selected) == 0:
+            messagebox.showwarning("Chưa chọn kho",
+                                   "Vui lòng chọn ít nhất một kho để phân tích.")
             return
+
         save_path = filedialog.asksaveasfilename(
             defaultextension='.xlsx',
             filetypes=[("Excel files", "*.xlsx")],
@@ -1014,16 +1052,58 @@ class App(tk.Tk):
         )
         if not save_path:
             return
+
+        self.btn_export.config(state='disabled')
+        self.status_text.set("Đang phân tích & xuất file...")
+        self.progress.start(12)
+        threading.Thread(
+            target=self._export_worker,
+            args=(save_path, selected),
+            daemon=True,
+        ).start()
+
+    def _export_worker(self, save_path, selected_stores):
         try:
-            export_excel(self.df_fill, self.df_transfer, save_path)
-            messagebox.showinfo(
-                "Thành công",
-                f"Đã xuất file:\n{save_path}\n\n"
-                "• Sheet 'Fill từ kho': đề xuất fill hàng từ kho về cửa hàng\n"
-                "• Sheet 'Luân chuyển cửa hàng': đề xuất chuyển giữa các cửa hàng"
+            df_sales = (self.df_sales_raw if self.df_sales_raw is not None
+                        else pd.read_excel(self.sales_path.get()))
+            df_inv   = (self.df_inv_raw   if self.df_inv_raw   is not None
+                        else pd.read_excel(self.inv_path.get()))
+
+            df_fill, df_transfer, df_summary, warnings = calculate(
+                df_sales, df_inv,
+                target_months   = self.target_months.get(),
+                slow_pct        = self.slow_pct.get(),
+                selected_stores = selected_stores,
+                allow_hcm_hn    = self.allow_hcm_hn.get(),
+                min_fill_avg    = self.min_fill_avg.get(),
             )
+            export_excel(df_fill, df_transfer, df_summary, save_path)
+            self.after(0, self._on_export_done, save_path, warnings, df_fill, df_transfer)
         except Exception as e:
-            messagebox.showerror("Lỗi xuất file", str(e))
+            self.after(0, self._on_export_error, str(e))
+
+    def _on_export_done(self, save_path, warnings, df_fill, df_transfer):
+        self.progress.stop()
+        self.btn_export.config(state='normal')
+        if warnings:
+            messagebox.showwarning("Cảnh báo", "\n".join(warnings))
+        total_fill  = int(df_fill['Fill thực tế'].sum())           if len(df_fill)     else 0
+        total_trans = int(df_transfer['Đề xuất luân chuyển'].sum()) if len(df_transfer) else 0
+        self.status_text.set(
+            f"Hoàn thành  •  Fill: {total_fill:,} SP  •  Luân chuyển: {total_trans:,} SP"
+        )
+        messagebox.showinfo(
+            "Xuất file thành công",
+            f"Đã lưu:\n{save_path}\n\n"
+            f"• Fill từ kho:            {total_fill:,} SP\n"
+            f"• Luân chuyển cửa hàng:  {total_trans:,} SP",
+        )
+
+    def _on_export_error(self, msg):
+        self.progress.stop()
+        self.btn_export.config(state='normal')
+        self.status_text.set("Lỗi!")
+        messagebox.showerror("Lỗi", msg)
 
 
 # ─── Entry ────────────────────────────────────────────────────────────────────
