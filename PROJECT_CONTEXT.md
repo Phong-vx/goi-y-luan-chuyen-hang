@@ -155,7 +155,13 @@ App (tk.Tk)
 
 **Threading:** Đọc file + tính toán chạy trên daemon thread riêng. Cập nhật UI thông qua `self.after(0, callback)` để tránh block main thread.
 
-**Auto-load stores:** Khi cả 2 path file thay đổi (`StringVar.trace`), tự động đọc danh sách cửa hàng và populate listbox. Phân loại: tên chứa `shopee` (case-insensitive) → kênh Shopee, còn lại → vật lý.
+**CheckListbox:** Widget tự build (Canvas + scrollable Frame + Checkbutton). Thay thế `tk.Listbox`. Hỗ trợ `set_items()`, `select_all()`, `deselect_all()`, `get_selected()`. Có mousewheel scroll.
+
+**Auto-load stores:** Khi cả 2 path file thay đổi (`StringVar.trace`), tự động đọc danh sách cửa hàng và populate 2 CheckListbox. Quy tắc phân loại:
+- **Kho Cửa Hàng** (cột trái): store có doanh số trong 3 tháng gần nhất VÀ không khớp từ khóa "other".
+- **Các kho khác** (cột phải): store khớp `OTHER_KW = ('shopee', 'droppi', 'xe thuê', 'kho kg')` HOẶC không có doanh số 3 tháng gần nhất.
+
+**DPI Windows:** `SetProcessDpiAwareness(2)` (per-monitor) được gọi trước khi tạo cửa sổ Tk, fallback về `SetProcessDPIAware()` nếu API cũ.
 
 ---
 
@@ -195,3 +201,4 @@ App (tk.Tk)
 | Ngày | Thay đổi | Lý do |
 |---|---|---|
 | 2026-04-13 | Tạo file PROJECT_CONTEXT.md | Tạo mới để lưu context dự án |
+| 2026-04-13 | Thay Listbox bằng CheckListbox (checkbox tick), đổi "Cửa hàng vật lý" → "Kho Cửa Hàng", "Kênh Shopee" → "Các kho khác"; phân loại store: chỉ store có doanh số 3T gần nhất vào Kho Cửa Hàng, còn lại (shopee/droppi/xe thuê/kho kg/không có số bán) vào Các kho khác; thêm DPI awareness cho Windows (`SetProcessDpiAwareness(2)`) | Cải thiện UX bộ lọc cửa hàng và độ nét trên màn hình HiDPI |

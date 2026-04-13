@@ -412,6 +412,66 @@ def export_excel(df_fill: pd.DataFrame, df_transfer: pd.DataFrame, save_path: st
         )
 
 
+# ─── CheckListbox ─────────────────────────────────────────────────────────────
+
+class CheckListbox(tk.Frame):
+    """Scrollable list of Checkbutton widgets with select/deselect-all support."""
+
+    def __init__(self, parent, height=130, **kwargs):
+        super().__init__(parent, bg='#FAFAFA',
+                         highlightbackground=BORDER, highlightthickness=1,
+                         **kwargs)
+        self.configure(height=height)
+        self.pack_propagate(False)
+
+        self._canvas = tk.Canvas(self, bg='#FAFAFA', highlightthickness=0)
+        _vsb = ttk.Scrollbar(self, orient='vertical', command=self._canvas.yview)
+        self._canvas.configure(yscrollcommand=_vsb.set)
+        _vsb.pack(side='right', fill='y')
+        self._canvas.pack(side='left', fill='both', expand=True)
+
+        self._inner  = tk.Frame(self._canvas, bg='#FAFAFA')
+        self._win_id = self._canvas.create_window((0, 0), window=self._inner, anchor='nw')
+
+        self._inner.bind('<Configure>',
+            lambda e: self._canvas.configure(scrollregion=self._canvas.bbox('all')))
+        self._canvas.bind('<Configure>',
+            lambda e: self._canvas.itemconfig(self._win_id, width=e.width))
+        self._canvas.bind('<MouseWheel>',
+            lambda e: self._canvas.yview_scroll(int(-1 * (e.delta / 120)), 'units'))
+
+        self._vars:  list = []
+        self._items: list = []
+
+    def set_items(self, items: list, select_all: bool = True):
+        for w in self._inner.winfo_children():
+            w.destroy()
+        self._vars  = []
+        self._items = list(items)
+        for item in items:
+            var = tk.BooleanVar(value=select_all)
+            tk.Checkbutton(
+                self._inner, text=item, variable=var,
+                bg='#FAFAFA', fg=TEXT_DARK,
+                font=('Segoe UI', 9),
+                activebackground='#E3F2FD',
+                selectcolor='white', anchor='w',
+                relief='flat', bd=0,
+            ).pack(fill='x', padx=6, pady=1)
+            self._vars.append(var)
+
+    def select_all(self):
+        for var in self._vars:
+            var.set(True)
+
+    def deselect_all(self):
+        for var in self._vars:
+            var.set(False)
+
+    def get_selected(self) -> list:
+        return [item for item, var in zip(self._items, self._vars) if var.get()]
+
+
 # ─── GUI ──────────────────────────────────────────────────────────────────────
 
 class App(tk.Tk):
@@ -551,13 +611,13 @@ class App(tk.Tk):
         card.grid_columnconfigure(0, weight=1)
         card.grid_columnconfigure(1, weight=1)
 
-        # ── Physical stores ──────────────────────────────────────────────────
+        # ── Kho Cửa Hàng (stores with recent sales) ──────────────────────────
         ph = tk.Frame(card, bg=CARD_BG)
         ph.grid(row=1, column=0, sticky='nsew', padx=(14, 6), pady=(8, 10))
 
         ph_top = tk.Frame(ph, bg=CARD_BG)
         ph_top.pack(fill='x')
-        tk.Label(ph_top, text="Cửa hàng vật lý",
+        tk.Label(ph_top, text="Kho Cửa Hàng",
                  bg=CARD_BG, fg=TEXT_DARK,
                  font=('Segoe UI', 9, 'bold')).pack(side='left')
         self.lbl_physical_count = tk.Label(ph_top, text="(chưa tải file)",
@@ -569,37 +629,23 @@ class App(tk.Tk):
         ph_btns.pack(fill='x', pady=(3, 3))
         tk.Button(ph_btns, text="Chọn tất cả", font=('Segoe UI', 8),
                   bg='#E3F2FD', fg=PRIMARY, relief='flat', cursor='hand2', padx=6, pady=1,
-                  command=lambda: self.lb_physical.select_set(0, tk.END)
+                  command=lambda: self.lb_physical.select_all()
                   ).pack(side='left', padx=(0, 4))
         tk.Button(ph_btns, text="Bỏ chọn tất cả", font=('Segoe UI', 8),
                   bg='#FFF3E0', fg=WARNING, relief='flat', cursor='hand2', padx=6, pady=1,
-                  command=lambda: self.lb_physical.select_clear(0, tk.END)
+                  command=lambda: self.lb_physical.deselect_all()
                   ).pack(side='left')
 
-        ph_frame = tk.Frame(ph, bg=CARD_BG,
-                            highlightbackground=BORDER, highlightthickness=1)
-        ph_frame.pack(fill='both', expand=True)
-        ph_vsb = ttk.Scrollbar(ph_frame, orient='vertical')
-        ph_vsb.pack(side='right', fill='y')
-        self.lb_physical = tk.Listbox(
-            ph_frame, selectmode=tk.MULTIPLE,
-            yscrollcommand=ph_vsb.set,
-            height=6, font=('Segoe UI', 9),
-            bg='#FAFAFA', fg=TEXT_DARK,
-            selectbackground=PRIMARY_L, selectforeground='white',
-            relief='flat', bd=0,
-            activestyle='none',
-        )
+        self.lb_physical = CheckListbox(ph, height=130)
         self.lb_physical.pack(fill='both', expand=True)
-        ph_vsb.config(command=self.lb_physical.yview)
 
-        # ── Shopee stores ────────────────────────────────────────────────────
+        # ── Các kho khác (Shopee + no-recent-sales + specific warehouses) ────
         sp = tk.Frame(card, bg=CARD_BG)
         sp.grid(row=1, column=1, sticky='nsew', padx=(6, 14), pady=(8, 10))
 
         sp_top = tk.Frame(sp, bg=CARD_BG)
         sp_top.pack(fill='x')
-        tk.Label(sp_top, text="Kênh Shopee",
+        tk.Label(sp_top, text="Các kho khác",
                  bg=CARD_BG, fg=TEXT_DARK,
                  font=('Segoe UI', 9, 'bold')).pack(side='left')
         self.lbl_shopee_count = tk.Label(sp_top, text="(chưa tải file)",
@@ -611,29 +657,15 @@ class App(tk.Tk):
         sp_btns.pack(fill='x', pady=(3, 3))
         tk.Button(sp_btns, text="Chọn tất cả", font=('Segoe UI', 8),
                   bg='#E3F2FD', fg=PRIMARY, relief='flat', cursor='hand2', padx=6, pady=1,
-                  command=lambda: self.lb_shopee.select_set(0, tk.END)
+                  command=lambda: self.lb_shopee.select_all()
                   ).pack(side='left', padx=(0, 4))
         tk.Button(sp_btns, text="Bỏ chọn tất cả", font=('Segoe UI', 8),
                   bg='#FFF3E0', fg=WARNING, relief='flat', cursor='hand2', padx=6, pady=1,
-                  command=lambda: self.lb_shopee.select_clear(0, tk.END)
+                  command=lambda: self.lb_shopee.deselect_all()
                   ).pack(side='left')
 
-        sp_frame = tk.Frame(sp, bg=CARD_BG,
-                            highlightbackground=BORDER, highlightthickness=1)
-        sp_frame.pack(fill='both', expand=True)
-        sp_vsb = ttk.Scrollbar(sp_frame, orient='vertical')
-        sp_vsb.pack(side='right', fill='y')
-        self.lb_shopee = tk.Listbox(
-            sp_frame, selectmode=tk.MULTIPLE,
-            yscrollcommand=sp_vsb.set,
-            height=6, font=('Segoe UI', 9),
-            bg='#FAFAFA', fg=TEXT_DARK,
-            selectbackground='#E64A19', selectforeground='white',
-            relief='flat', bd=0,
-            activestyle='none',
-        )
+        self.lb_shopee = CheckListbox(sp, height=130)
         self.lb_shopee.pack(fill='both', expand=True)
-        sp_vsb.config(command=self.lb_shopee.yview)
 
     # ── settings card ────────────────────────────────────────────────────────
 
@@ -816,11 +848,31 @@ class App(tk.Tk):
             self.df_sales_raw = df
             self.df_inv_raw   = df_inv
 
-            retail = df[df['Sale Team'].str.strip() == 'Bán Lẻ']
-            stores = sorted(retail['location Name'].dropna().astype(str).unique().tolist())
+            retail = df[df['Sale Team'].str.strip() == 'Bán Lẻ'].copy()
+            retail['Date'] = pd.to_datetime(retail['Date'], errors='coerce')
+            all_stores = sorted(
+                retail['location Name'].dropna().astype(str).unique().tolist()
+            )
 
-            physical = [s for s in stores if 'shopee' not in s.lower()]
-            shopee   = [s for s in stores if 'shopee' in s.lower()]
+            # Stores that have sales in the last 3 months
+            stores_with_recent: set = set()
+            if not retail.empty:
+                max_date = retail['Date'].max()
+                min_3m   = max_date - pd.DateOffset(months=3)
+                recent   = retail[retail['Date'] >= min_3m]
+                stores_with_recent = set(
+                    recent['location Name'].dropna().astype(str).unique()
+                )
+
+            # Keywords that always go to "Các kho khác" regardless of sales
+            OTHER_KW = ('shopee', 'droppi', 'xe thuê', 'kho kg')
+
+            def is_other(name: str) -> bool:
+                n = name.lower()
+                return any(kw in n for kw in OTHER_KW) or name not in stores_with_recent
+
+            physical = [s for s in all_stores if not is_other(s)]
+            shopee   = [s for s in all_stores if is_other(s)]
 
             self.after(0, self._populate_store_lists, physical, shopee)
         except Exception:
@@ -830,19 +882,12 @@ class App(tk.Tk):
         self._physical_stores = physical
         self._shopee_stores   = shopee
 
-        self.lb_physical.delete(0, tk.END)
-        for s in physical:
-            self.lb_physical.insert(tk.END, s)
-        self.lb_physical.select_set(0, tk.END)
-
-        self.lb_shopee.delete(0, tk.END)
-        for s in shopee:
-            self.lb_shopee.insert(tk.END, s)
-        self.lb_shopee.select_set(0, tk.END)
+        self.lb_physical.set_items(physical, select_all=True)
+        self.lb_shopee.set_items(shopee, select_all=True)
 
         self.lbl_physical_count.config(text=f"({len(physical)} cửa hàng)")
         self.lbl_shopee_count.config(
-            text=f"({len(shopee)} kênh)" if shopee else "(không có)"
+            text=f"({len(shopee)} kho)" if shopee else "(không có)"
         )
 
     def _on_store_load_error(self):
@@ -855,11 +900,7 @@ class App(tk.Tk):
         """Return selected store names (None = include all when no list loaded)."""
         if not self._physical_stores and not self._shopee_stores:
             return None  # files not loaded yet; calculate() will use all
-        physical_sel = [self._physical_stores[i]
-                        for i in self.lb_physical.curselection()]
-        shopee_sel   = [self._shopee_stores[i]
-                        for i in self.lb_shopee.curselection()]
-        return physical_sel + shopee_sel
+        return self.lb_physical.get_selected() + self.lb_shopee.get_selected()
 
     # ── analysis ─────────────────────────────────────────────────────────────
 
@@ -988,5 +1029,15 @@ class App(tk.Tk):
 # ─── Entry ────────────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
+    # High-DPI awareness on Windows (auto-scales to monitor DPI)
+    if sys.platform == 'win32':
+        try:
+            from ctypes import windll
+            windll.shcore.SetProcessDpiAwareness(2)   # Per-monitor DPI aware v1
+        except Exception:
+            try:
+                windll.user32.SetProcessDPIAware()    # Fallback: system DPI aware
+            except Exception:
+                pass
     app = App()
     app.mainloop()
