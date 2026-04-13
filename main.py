@@ -97,23 +97,71 @@ def calculate(df_sales: pd.DataFrame, df_inv: pd.DataFrame,
     )
     vel['AvgMonthly'] = vel['Sold3M'] / actual_months
 
+    # ── Revenue column lookup ─────────────────────────────────────────────────
+    _REV_COLS = ['Revenue', 'Amount', 'Doanh thu', 'Doanh Thu', 'Thành tiền',
+                 'Net Amount', 'Total Amount', 'Giá trị', 'Total', 'Subtotal']
+    _rev_col  = next((c for c in _REV_COLS if c in retail_sales.columns), None)
+    if _rev_col:
+        retail_sales[_rev_col] = pd.to_numeric(retail_sales[_rev_col], errors='coerce').fillna(0)
+        sales_3m[_rev_col]     = pd.to_numeric(sales_3m[_rev_col],     errors='coerce').fillna(0)
+        all_time = (
+            retail_sales
+            .groupby(['location Name', 'SKU'], as_index=False)
+            .agg({'Quantity': 'sum', _rev_col: 'sum'})
+            .rename(columns={'location Name': 'Store', 'Quantity': 'SoldAll', _rev_col: 'RevAll'})
+        )
+        rev3m_df = (
+            sales_3m
+            .groupby(['location Name', 'SKU'], as_index=False)[_rev_col]
+            .sum()
+            .rename(columns={'location Name': 'Store', _rev_col: 'Rev3M'})
+        )
+    else:
+        all_time = (
+            retail_sales
+            .groupby(['location Name', 'SKU'], as_index=False)['Quantity']
+            .sum()
+            .rename(columns={'location Name': 'Store', 'Quantity': 'SoldAll'})
+        )
+        all_time['RevAll'] = 0
+        rev3m_df = vel[['Store', 'SKU']].copy()
+        rev3m_df['Rev3M'] = 0
+    all_time['SKU']  = all_time['SKU'].astype(str)
+    rev3m_df['SKU']  = rev3m_df['SKU'].astype(str)
+
     prod_names = (
         retail_sales[['SKU', 'Product Item']]
         .drop_duplicates('SKU')
         .rename(columns={'Product Item': 'ProductName'})
     )
 
-    # ── SKU → Category mapping ────────────────────────────────────────────────
-    _CAT_COLS = ['Category', 'Danh mục', 'Danh Mục', 'Product Category',
-                 'Nhóm hàng', 'Nhóm SP', 'Nhóm', 'Loại hàng']
-    _cat_col  = next((c for c in _CAT_COLS if c in df_sales.columns), None)
-    if _cat_col:
-        sku_cat = (df_sales[['SKU', _cat_col]]
-                   .drop_duplicates('SKU')
-                   .rename(columns={_cat_col: 'Category'}))
-        sku_cat['SKU'] = sku_cat['SKU'].astype(str)
+    # ── SKU → Product attributes mapping ─────────────────────────────────────
+    _PROD_ATTR_COLS = ['BRAND', 'Category', 'Model', 'Sub Category', 'Color', 'Frame Size']
+    _attr_lookup = {
+        'BRAND':        ['BRAND', 'Brand', 'Thương hiệu'],
+        'Category':     ['Category', 'Danh mục', 'Danh Mục', 'Product Category',
+                         'Nhóm hàng', 'Nhóm SP', 'Nhóm'],
+        'Model':        ['Model', 'Mô hình', 'Product Model'],
+        'Sub Category': ['Sub Category', 'SubCategory', 'Danh mục phụ', 'Nhóm con'],
+        'Color':        ['Color', 'Colour', 'Màu sắc', 'Màu'],
+        'Frame Size':   ['Frame Size', 'FrameSize', 'Size', 'Kích thước khung'],
+    }
+    _col_map = {}   # target_attr → actual column name in df_sales
+    for _attr, _candidates in _attr_lookup.items():
+        _found = next((c for c in _candidates if c in df_sales.columns), None)
+        if _found:
+            _col_map[_attr] = _found
+
+    if _col_map:
+        _src = ['SKU'] + list(dict.fromkeys(_col_map.values()))   # deduplicate
+        prod_attrs = df_sales[_src].drop_duplicates('SKU').copy()
+        prod_attrs = prod_attrs.rename(columns={v: k for k, v in _col_map.items()})
     else:
-        sku_cat = pd.DataFrame(columns=['SKU', 'Category'])
+        prod_attrs = pd.DataFrame({'SKU': df_sales['SKU'].unique()})
+    prod_attrs['SKU'] = prod_attrs['SKU'].astype(str)
+    for _attr in _PROD_ATTR_COLS:
+        if _attr not in prod_attrs.columns:
+            prod_attrs[_attr] = ''
 
     # ── retail inventory ─────────────────────────────────────────────────────
     inv_retail = df_inv[df_inv['Địa điểm/Team'].str.strip() == 'Bán Lẻ'].copy()
@@ -179,17 +227,28 @@ def calculate(df_sales: pd.DataFrame, df_inv: pd.DataFrame,
         remaining_kho[sku] = max(0, avail - qty)
     fill['FinalFill'] = final_fills
 
+    # Merge all-time + 3-month revenue into fill
+    fill = fill.merge(all_time[['Store', 'SKU', 'SoldAll', 'RevAll']], on=['Store', 'SKU'], how='left')
+    fill = fill.merge(rev3m_df[['Store', 'SKU', 'Rev3M']],             on=['Store', 'SKU'], how='left')
+    fill['SoldAll'] = fill['SoldAll'].fillna(0).astype(int)
+    fill['RevAll']  = fill['RevAll'].fillna(0)
+    fill['Rev3M']   = fill['Rev3M'].fillna(0)
+
     df_fill = fill[fill['FinalFill'] > 0].copy()
     df_fill = df_fill[[
         'Store', 'SKU', 'ProductName',
-        'Sold3M', 'AvgMonthly', 'WeeksOfStock',
+        'SoldAll', 'RevAll', 'Sold3M', 'Rev3M',
+        'AvgMonthly', 'WeeksOfStock',
         'StoreQty', 'TargetStock', 'SuggestedFill',
         'KhoQty', 'FinalFill',
     ]].rename(columns={
         'Store':         'Cửa hàng',
         'SKU':           'Mã hàng',
         'ProductName':   'Tên sản phẩm',
+        'SoldAll':       'Tổng bán toàn TG',
+        'RevAll':        'Doanh thu toàn TG',
         'Sold3M':        'Đã bán 3T',
+        'Rev3M':         'Doanh thu 3T',
         'AvgMonthly':    'Sức bán TB/tháng',
         'WeeksOfStock':  'Tuần tồn kho',
         'StoreQty':      'Tồn cửa hàng',
@@ -201,21 +260,21 @@ def calculate(df_sales: pd.DataFrame, df_inv: pd.DataFrame,
     df_fill['Sức bán TB/tháng'] = df_fill['Sức bán TB/tháng'].round(2)
     df_fill = df_fill.sort_values(['Cửa hàng', 'Sức bán TB/tháng'], ascending=[True, False])
 
-    # Category + Trạng thái cho Sheet 1
-    if not sku_cat.empty:
-        df_fill = (df_fill
-                   .merge(sku_cat, left_on='Mã hàng', right_on='SKU', how='left')
-                   .drop(columns=['SKU']))
-    else:
-        df_fill['Category'] = 'Chưa phân loại'
-    df_fill['Category']   = df_fill['Category'].fillna('Chưa phân loại')
+    # Product attributes + Trạng thái cho Sheet 1
+    df_fill = (df_fill
+               .merge(prod_attrs[['SKU'] + _PROD_ATTR_COLS], left_on='Mã hàng', right_on='SKU', how='left')
+               .drop(columns=['SKU']))
+    for _attr in _PROD_ATTR_COLS:
+        df_fill[_attr] = df_fill[_attr].fillna('')
     df_fill['Trạng thái'] = df_fill['Fill thực tế'].apply(
         lambda x: 'Cần Fill hàng' if x >= 1 else 'Đủ hàng'
     )
-    df_fill = df_fill[['Cửa hàng', 'Mã hàng', 'Tên sản phẩm', 'Category',
-                        'Đã bán 3T', 'Sức bán TB/tháng', 'Tuần tồn kho',
-                        'Tồn cửa hàng', 'Mức tồn mục tiêu', 'Đề xuất fill',
-                        'Tồn kho', 'Fill thực tế', 'Trạng thái']]
+    _fill_cols = (['Cửa hàng', 'Mã hàng', 'Tên sản phẩm'] + _PROD_ATTR_COLS +
+                  ['Tổng bán toàn TG', 'Doanh thu toàn TG', 'Đã bán 3T', 'Doanh thu 3T',
+                   'Sức bán TB/tháng', 'Tuần tồn kho',
+                   'Tồn cửa hàng', 'Mức tồn mục tiêu', 'Đề xuất fill',
+                   'Tồn kho', 'Fill thực tế', 'Trạng thái'])
+    df_fill = df_fill[[c for c in _fill_cols if c in df_fill.columns]]
 
     # ── SHEET 2: transfers between stores ────────────────────────────────────
     relevant_skus = set(vel['SKU'].astype(str).unique()) | set(
@@ -235,12 +294,12 @@ def calculate(df_sales: pd.DataFrame, df_inv: pd.DataFrame,
                 'StoreQty':   i_sku.get(store, 0),
             })
 
-    _empty_transfer = pd.DataFrame(columns=[
-        'Mã hàng', 'Tên sản phẩm', 'Category',
-        'Cửa hàng gửi', 'Tồn gửi', 'Sức bán gửi TB/tháng',
-        'Cửa hàng nhận', 'Tồn nhận', 'Sức bán nhận TB/tháng',
-        'Đề xuất luân chuyển', 'Trạng thái',
-    ])
+    _empty_transfer = pd.DataFrame(columns=(
+        ['Mã hàng', 'Tên sản phẩm'] + _PROD_ATTR_COLS +
+        ['Cửa hàng gửi', 'Tồn gửi', 'Sức bán gửi TB/tháng',
+         'Cửa hàng nhận', 'Tồn nhận', 'Sức bán nhận TB/tháng',
+         'Đề xuất luân chuyển', 'Trạng thái']
+    ))
 
     if not grid_rows:
         # build minimal summary from fill only
@@ -335,21 +394,20 @@ def calculate(df_sales: pd.DataFrame, df_inv: pd.DataFrame,
         })
         df_transfer = df_transfer.sort_values(['Mã hàng', 'Cửa hàng gửi'])
 
-        # Category + Trạng thái cho Sheet 2
-        if not sku_cat.empty:
-            df_transfer = (df_transfer
-                           .merge(sku_cat, left_on='Mã hàng', right_on='SKU', how='left')
-                           .drop(columns=['SKU']))
-        else:
-            df_transfer['Category'] = 'Chưa phân loại'
-        df_transfer['Category']   = df_transfer['Category'].fillna('Chưa phân loại')
+        # Product attributes + Trạng thái cho Sheet 2
+        df_transfer = (df_transfer
+                       .merge(prod_attrs[['SKU'] + _PROD_ATTR_COLS], left_on='Mã hàng', right_on='SKU', how='left')
+                       .drop(columns=['SKU']))
+        for _attr in _PROD_ATTR_COLS:
+            df_transfer[_attr] = df_transfer[_attr].fillna('')
         df_transfer['Trạng thái'] = df_transfer['Đề xuất luân chuyển'].apply(
             lambda x: 'Cần Luân Chuyển' if x >= 1 else 'Đủ hàng'
         )
-        df_transfer = df_transfer[['Mã hàng', 'Tên sản phẩm', 'Category',
-                                    'Cửa hàng gửi', 'Tồn gửi', 'Sức bán gửi TB/tháng',
-                                    'Cửa hàng nhận', 'Tồn nhận', 'Sức bán nhận TB/tháng',
-                                    'Đề xuất luân chuyển', 'Trạng thái']]
+        _xfer_cols = (['Mã hàng', 'Tên sản phẩm'] + _PROD_ATTR_COLS +
+                      ['Cửa hàng gửi', 'Tồn gửi', 'Sức bán gửi TB/tháng',
+                       'Cửa hàng nhận', 'Tồn nhận', 'Sức bán nhận TB/tháng',
+                       'Đề xuất luân chuyển', 'Trạng thái'])
+        df_transfer = df_transfer[[c for c in _xfer_cols if c in df_transfer.columns]]
     else:
         df_transfer = _empty_transfer
 
@@ -450,7 +508,7 @@ def export_excel(df_fill: pd.DataFrame, df_transfer: pd.DataFrame,
         sub_blank = workbook.add_format({'bg_color': '#1E88E5', 'border': 1})
 
         def write_sheet(df, sheet_name, title_text, group_col, sum_cols,
-                        highlight_col=None, hl_fmts=None):
+                        highlight_col=None, hl_fmts=None, show_subtotal=True):
             n_cols   = len(df.columns)
             col_list = list(df.columns)
             ws       = workbook.add_worksheet(sheet_name)
@@ -488,15 +546,16 @@ def export_excel(df_fill: pd.DataFrame, df_transfer: pd.DataFrame,
                     ws.set_row(ri, 18)
                     ri  += 1
                     alt += 1
-                for ci, col in enumerate(col_list):
-                    if ci == 0:
-                        ws.write(ri, ci, f'Tổng  {group_val}', sub_text)
-                    elif col in sum_cols:
-                        ws.write(ri, ci, sums[col], sub_num)
-                    else:
-                        ws.write(ri, ci, '', sub_blank)
-                ws.set_row(ri, 20)
-                ri += 1
+                if show_subtotal:
+                    for ci, col in enumerate(col_list):
+                        if ci == 0:
+                            ws.write(ri, ci, f'Tổng  {group_val}', sub_text)
+                        elif col in sum_cols:
+                            ws.write(ri, ci, sums[col], sub_num)
+                        else:
+                            ws.write(ri, ci, '', sub_blank)
+                    ws.set_row(ri, 20)
+                    ri += 1
 
             for ci, col in enumerate(col_list):
                 if df.empty:
@@ -509,10 +568,13 @@ def export_excel(df_fill: pd.DataFrame, df_transfer: pd.DataFrame,
             df_fill, 'Fill từ kho',
             title_text    = 'PHÂN TÍCH FILL HÀNG TỪ KHO',
             group_col     = 'Cửa hàng',
-            sum_cols      = ['Đã bán 3T', 'Tồn cửa hàng', 'Mức tồn mục tiêu',
+            sum_cols      = ['Tổng bán toàn TG', 'Doanh thu toàn TG',
+                             'Đã bán 3T', 'Doanh thu 3T',
+                             'Tồn cửa hàng', 'Mức tồn mục tiêu',
                              'Đề xuất fill', 'Fill thực tế'],
             highlight_col = 'Fill thực tế',
             hl_fmts       = hl_fill,
+            show_subtotal = False,
         )
         write_sheet(
             df_transfer, 'Luân chuyển cửa hàng',
@@ -536,7 +598,7 @@ def export_excel(df_fill: pd.DataFrame, df_transfer: pd.DataFrame,
 class CheckListbox(tk.Frame):
     """Scrollable list of Checkbutton widgets with select/deselect-all and live filter."""
 
-    def __init__(self, parent, height=130, **kwargs):
+    def __init__(self, parent, height=200, **kwargs):
         super().__init__(parent, bg='#FAFAFA',
                          highlightbackground=BORDER, highlightthickness=1,
                          **kwargs)
@@ -556,8 +618,16 @@ class CheckListbox(tk.Frame):
             lambda e: self._canvas.configure(scrollregion=self._canvas.bbox('all')))
         self._canvas.bind('<Configure>',
             lambda e: self._canvas.itemconfig(self._win_id, width=e.width))
-        self._canvas.bind('<MouseWheel>',
-            lambda e: self._canvas.yview_scroll(int(-1 * (e.delta / 120)), 'units'))
+
+        # Shared scroll handler — also reused in _render for each Checkbutton
+        def _scroll(e):
+            delta = e.delta if e.delta else (-120 if getattr(e, 'num', 0) == 4 else 120)
+            self._canvas.yview_scroll(int(-1 * delta / 120), 'units')
+        self._scroll_cmd = _scroll
+        self._canvas.bind('<MouseWheel>',  self._scroll_cmd)
+        self._canvas.bind('<Button-4>',    self._scroll_cmd)   # Linux scroll up
+        self._canvas.bind('<Button-5>',    self._scroll_cmd)   # Linux scroll down
+        self._inner.bind('<MouseWheel>',   self._scroll_cmd)
 
         self._var_map:   dict = {}   # {item_name: BooleanVar} — full state
         self._all_items: list = []
@@ -579,14 +649,18 @@ class CheckListbox(tk.Frame):
             w.destroy()
         for item in items:
             var = self._var_map[item]
-            tk.Checkbutton(
+            cb = tk.Checkbutton(
                 self._inner, text=item, variable=var,
                 bg='#FAFAFA', fg=TEXT_DARK,
                 font=('Segoe UI', 9),
                 activebackground='#E3F2FD',
                 selectcolor='white', anchor='w',
                 relief='flat', bd=0,
-            ).pack(fill='x', padx=6, pady=1)
+            )
+            cb.pack(fill='x', padx=6, pady=1)
+            cb.bind('<MouseWheel>', self._scroll_cmd)
+            cb.bind('<Button-4>',   self._scroll_cmd)
+            cb.bind('<Button-5>',   self._scroll_cmd)
         self._canvas.yview_moveto(0)
 
     def select_all(self):
@@ -608,7 +682,7 @@ class App(tk.Tk):
         super().__init__()
         self.title(APP_TITLE)
         self.resizable(True, True)
-        self.minsize(900, 700)
+        self.minsize(900, 750)
         self.configure(bg=BG)
 
         # state
@@ -636,7 +710,7 @@ class App(tk.Tk):
 
     def _center(self):
         self.update_idletasks()
-        w, h = 1020, 720
+        w, h = 1020, 820
         x = (self.winfo_screenwidth()  - w) // 2
         y = (self.winfo_screenheight() - h) // 2
         self.geometry(f"{w}x{h}+{x}+{y}")
