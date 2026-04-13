@@ -1,21 +1,22 @@
-name: Build Windows EXE
+name: Build EXE and Release
 
 on:
   push:
-    branches: [ main, master ]
-  workflow_dispatch:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: windows-latest
-    permissions:
-      contents: write
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -23,40 +24,12 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Build EXE with PyInstaller
-        run: pyinstaller app.spec --clean --noconfirm
+      - name: Build EXE
+        run: pyinstaller app.spec
 
-      - name: Upload EXE as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: LuanChuyenHangHoa-Windows
-          path: dist/LuanChuyenHangHoa.exe
-          retention-days: 30
-
-      - name: Create Release
+      - name: Upload Release
         uses: softprops/action-gh-release@v2
-        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         with:
-          tag_name: v${{ github.run_number }}
-          name: "Release v${{ github.run_number }}"
-          body: |
-            ## App Luân Chuyển Hàng Hoá – Build tự động
-
-            **Tải file:** `LuanChuyenHangHoa.exe` bên dưới
-
-            ### Hướng dẫn sử dụng
-            1. Tải và chạy `LuanChuyenHangHoa.exe`
-            2. Chọn file **dữ liệu bán hàng** (data sale out.xlsx)
-            3. Chọn file **tồn kho** (inventory.xlsx)
-            4. Điều chỉnh tham số nếu cần (mặc định: 1.5 tháng tồn mục tiêu)
-            5. Nhấn **Phân Tích**
-            6. Nhấn **Xuất Excel** để lưu kết quả
-
-            ### 2 sheet trong file kết quả
-            - **Fill từ kho**: đề xuất fill hàng từ kho về từng cửa hàng theo sức bán
-            - **Luân chuyển cửa hàng**: đề xuất chuyển hàng từ cửa hàng bán chậm sang cửa hàng bán tốt
           files: dist/LuanChuyenHangHoa.exe
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: "Phiên bản ${{ github.ref_name }}"
+          body: "Tải file exe về và chạy trực tiếp, không cần cài Python."
